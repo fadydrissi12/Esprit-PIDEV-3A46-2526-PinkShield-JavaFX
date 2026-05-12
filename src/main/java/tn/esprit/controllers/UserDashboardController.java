@@ -1,5 +1,7 @@
 package tn.esprit.controllers;
 
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 import javafx.application.Platform;
 import javafx.concurrent.Task;
 import javafx.fxml.FXML;
@@ -26,10 +28,16 @@ import tn.esprit.services.OpenAiChatService;
 import tn.esprit.services.UserService;
 import tn.esprit.utils.AppNavigator;
 import tn.esprit.utils.FormValidator;
+import tn.esprit.utils.MyDB;
 
 import java.io.IOException;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import javafx.util.Duration;
 
 public class UserDashboardController {
     private static final DateTimeFormatter PROFILE_TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
@@ -85,6 +93,11 @@ public class UserDashboardController {
     private User loggedInUser;
     private String previousChatResponseId;
     private boolean chatRequestInFlight;
+    private Timeline notificationPollingTimeline;
+    private int lastSeenAppointmentId;
+    private int lastSeenNotificationId;
+    private int lastSeenSymfonyNotificationId;
+    private boolean notificationPollingInFlight;
 
     @FXML
     public void initialize() {
@@ -108,6 +121,7 @@ public class UserDashboardController {
         updateAppointmentCards();
         initializeChatbotConversation();
         refreshNotificationBell();
+        startNotificationPolling();
     }
 
     @FXML
@@ -236,6 +250,7 @@ public class UserDashboardController {
 
     @FXML
     public void handleLogout() {
+        stopNotificationPolling();
         try {
             FXMLLoader loader = new FXMLLoader(getClass().getResource("/fxml/login.fxml"));
             Scene scene = AppNavigator.createScene(loader.load(), getClass());
@@ -416,6 +431,313 @@ public class UserDashboardController {
         }
     }
 
+    private void startNotificationPolling() {
+        stopNotificationPolling();
+        initializePollingWatermark();
+
+        notificationPollingTimeline = new Timeline(
+                new KeyFrame(Duration.seconds(5), event -> pollExternalNotifications())
+        );
+        notificationPollingTimeline.setCycleCount(Timeline.INDEFINITE);
+        notificationPollingTimeline.play();
+    }
+
+    private void stopNotificationPolling() {
+        if (notificationPollingTimeline != null) {
+            notificationPollingTimeline.stop();
+            notificationPollingTimeline = null;
+        }
+        notificationPollingInFlight = false;
+    }
+
+    private void initializePollingWatermark() {
+        if (loggedInUser == null) {
+            return;
+        }
+
+        try {
+            Connection connection = MyDB.getInstance().getConnection();
+            if (connection == null) {
+                return;
+            }
+
+            lastSeenAppointmentId = readMaxAppointmentId(connection);
+            lastSeenNotificationId = readMaxNotificationId(connection);
+            lastSeenSymfonyNotificationId = readMaxSymfonyNotificationId(connection);
+        } catch (SQLException e) {
+            System.err.println("Could not initialize notification polling: " + e.getMessage());
+        }
+    }
+
+    private void pollExternalNotifications() {
+        if (loggedInUser == null || notificationPollingInFlight) {
+            return;
+        }
+
+        notificationPollingInFlight = true;
+        Task<PollingResult> task = new Task<>() {
+            @Override
+            protected PollingResult call() throws SQLException {
+                Connection connection = MyDB.getInstance().getConnection();
+                if (connection == null) {
+                    return PollingResult.empty();
+                }
+
+                PollingResult appointmentResult = checkNewAppointment(connection);
+                PollingResult notificationResult = checkUnreadNotification(connection);
+                PollingResult symfonyNotificationResult = checkSymfonyNotification(connection);
+                return appointmentResult.merge(notificationResult).merge(symfonyNotificationResult);
+            }
+        };
+
+        task.setOnSucceeded(event -> {
+            notificationPollingInFlight = false;
+            PollingResult result = task.getValue();
+            if (result == null || result.isEmpty()) {
+                return;
+            }
+
+            if (result.latestAppointmentId() > lastSeenAppointmentId) {
+                lastSeenAppointmentId = result.latestAppointmentId();
+            }
+            if (result.latestNotificationId() > lastSeenNotificationId) {
+                lastSeenNotificationId = result.latestNotificationId();
+            }
+            if (result.latestSymfonyNotificationId() > lastSeenSymfonyNotificationId) {
+                lastSeenSymfonyNotificationId = result.latestSymfonyNotificationId();
+            }
+
+            refreshNotificationBell();
+            updateAppointmentCards();
+            if (notificationPanel != null && notificationPanel.isVisible()) {
+                renderNotifications();
+            }
+        });
+
+        task.setOnFailed(event -> {
+            notificationPollingInFlight = false;
+            Throwable exception = task.getException();
+            String message = exception == null ? "Unknown polling error" : exception.getMessage();
+            System.err.println("Notification polling error: " + message);
+        });
+
+        Thread thread = new Thread(task, "pinkshield-notification-polling");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    private int readMaxAppointmentId(Connection connection) throws SQLException {
+        String sql = "SELECT COALESCE(MAX(id), 0) FROM appointment WHERE patient_email = ?";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, loggedInUser.getEmail());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        }
+    }
+
+    private int readMaxNotificationId(Connection connection) throws SQLException {
+        String sql = "SELECT COALESCE(MAX(id), 0) FROM notifications WHERE user_id = ? OR user_email = ?";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, loggedInUser.getId());
+            ps.setString(2, loggedInUser.getEmail());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        }
+    }
+
+    private int readMaxSymfonyNotificationId(Connection connection) throws SQLException {
+        String sql = "SELECT COALESCE(MAX(id), 0) FROM notification WHERE user_id = ?";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, loggedInUser.getId());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        } catch (SQLException e) {
+            System.err.println("Symfony notification polling unavailable: " + e.getMessage());
+            return 0;
+        }
+    }
+
+    private PollingResult checkNewAppointment(Connection connection) throws SQLException {
+        String sql = """
+                SELECT id, doctor_name, status
+                FROM appointment
+                WHERE patient_email = ? AND id > ?
+                ORDER BY id ASC
+                LIMIT 1
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, loggedInUser.getEmail());
+            ps.setInt(2, lastSeenAppointmentId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return PollingResult.empty();
+                }
+
+                int appointmentId = rs.getInt("id");
+                String doctorName = rs.getString("doctor_name");
+                String status = rs.getString("status");
+                String message = "New appointment booked"
+                        + (doctorName == null || doctorName.isBlank() ? "" : " with " + doctorName)
+                        + (status == null || status.isBlank() ? "." : " (" + status + ").");
+                int notificationId = createAppointmentNotification(connection, message);
+                return new PollingResult(appointmentId, notificationId, 0, message);
+            }
+        }
+    }
+
+    private int createAppointmentNotification(Connection connection, String message) throws SQLException {
+        String sql = """
+                INSERT INTO notifications (user_id, user_email, type, title, message, is_read)
+                VALUES (?, ?, 'appointment', 'New appointment booked', ?, 0)
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql, java.sql.Statement.RETURN_GENERATED_KEYS)) {
+            ps.setInt(1, loggedInUser.getId());
+            ps.setString(2, loggedInUser.getEmail());
+            ps.setString(3, message);
+            ps.executeUpdate();
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                return keys.next() ? keys.getInt(1) : 0;
+            }
+        }
+    }
+
+    private PollingResult checkUnreadNotification(Connection connection) throws SQLException {
+        String sql = """
+                SELECT id, title, message
+                FROM notifications
+                WHERE (user_id = ? OR user_email = ?) AND is_read = 0 AND id > ?
+                ORDER BY id ASC
+                LIMIT 1
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, loggedInUser.getId());
+            ps.setString(2, loggedInUser.getEmail());
+            ps.setInt(3, lastSeenNotificationId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return PollingResult.empty();
+                }
+
+                int notificationId = rs.getInt("id");
+                String title = rs.getString("title");
+                String message = rs.getString("message");
+                String notificationMessage = (title == null || title.isBlank() ? "New notification" : title)
+                        + (message == null || message.isBlank() ? "" : ": " + message);
+                return new PollingResult(0, notificationId, 0, notificationMessage);
+            }
+        }
+    }
+
+    private PollingResult checkSymfonyNotification(Connection connection) throws SQLException {
+        String sql = """
+                SELECT id, title, message, type
+                FROM notification
+                WHERE user_id = ? AND is_read = 0 AND id > ?
+                ORDER BY id ASC
+                LIMIT 1
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, loggedInUser.getId());
+            ps.setInt(2, lastSeenSymfonyNotificationId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return PollingResult.empty();
+                }
+
+                int symfonyNotificationId = rs.getInt("id");
+                String title = rs.getString("title");
+                String message = rs.getString("message");
+                String type = normalizeNotificationType(rs.getString("type"));
+                int javaFxNotificationId = copySymfonyNotificationToJavaFx(connection, type, title, message);
+                return new PollingResult(0, javaFxNotificationId, symfonyNotificationId, title + ": " + message);
+            }
+        } catch (SQLException e) {
+            System.err.println("Error polling Symfony notifications: " + e.getMessage());
+            return PollingResult.empty();
+        }
+    }
+
+    private int copySymfonyNotificationToJavaFx(Connection connection, String type, String title, String message) throws SQLException {
+        if (javaFxNotificationExists(connection, title, message)) {
+            return 0;
+        }
+
+        String sql = """
+                INSERT INTO notifications (user_id, user_email, type, title, message, is_read)
+                VALUES (?, ?, ?, ?, ?, 0)
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql, java.sql.Statement.RETURN_GENERATED_KEYS)) {
+            ps.setInt(1, loggedInUser.getId());
+            ps.setString(2, loggedInUser.getEmail());
+            ps.setString(3, type);
+            ps.setString(4, title == null || title.isBlank() ? "New notification" : title);
+            ps.setString(5, message == null ? "" : message);
+            ps.executeUpdate();
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                return keys.next() ? keys.getInt(1) : 0;
+            }
+        }
+    }
+
+    private boolean javaFxNotificationExists(Connection connection, String title, String message) throws SQLException {
+        String sql = """
+                SELECT COUNT(*)
+                FROM notifications
+                WHERE (user_id = ? OR user_email = ?) AND title = ? AND message = ?
+                """;
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setInt(1, loggedInUser.getId());
+            ps.setString(2, loggedInUser.getEmail());
+            ps.setString(3, title == null || title.isBlank() ? "New notification" : title);
+            ps.setString(4, message == null ? "" : message);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && rs.getInt(1) > 0;
+            }
+        }
+    }
+
+    private String normalizeNotificationType(String symfonyType) {
+        if (symfonyType == null || symfonyType.isBlank()) {
+            return "notification";
+        }
+        String normalized = symfonyType.trim().toLowerCase();
+        if ("success".equals(normalized)) {
+            return "transaction";
+        }
+        if ("danger".equals(normalized)) {
+            return "alert";
+        }
+        return normalized;
+    }
+
+    private record PollingResult(int latestAppointmentId, int latestNotificationId, int latestSymfonyNotificationId, String message) {
+        private static PollingResult empty() {
+            return new PollingResult(0, 0, 0, "");
+        }
+
+        private boolean isEmpty() {
+            return latestAppointmentId <= 0 && latestNotificationId <= 0 && latestSymfonyNotificationId <= 0;
+        }
+
+        private PollingResult merge(PollingResult other) {
+            if (other == null || other.isEmpty()) {
+                return this;
+            }
+            if (isEmpty()) {
+                return other;
+            }
+            return new PollingResult(
+                    Math.max(latestAppointmentId, other.latestAppointmentId),
+                    Math.max(latestNotificationId, other.latestNotificationId),
+                    Math.max(latestSymfonyNotificationId, other.latestSymfonyNotificationId),
+                    message + "\n" + other.message
+            );
+        }
+    }
+
     private void showNotificationPanel(boolean visible) {
         if (notificationPanel == null) {
             return;
@@ -550,6 +872,8 @@ public class UserDashboardController {
                 ((BlogListController) controller).setCurrentUser(loggedInUser);
             } else if (controller instanceof BlogDetailController) {
                 ((BlogDetailController) controller).setCurrentUser(loggedInUser);
+            } else if (controller instanceof ForumController) {
+                ((ForumController) controller).setLoggedInUser(loggedInUser);
             } else if (controller instanceof AppointmentListController) {
                 ((AppointmentListController) controller).setCurrentUser(loggedInUser);
             } else if (controller instanceof ProductListController) {

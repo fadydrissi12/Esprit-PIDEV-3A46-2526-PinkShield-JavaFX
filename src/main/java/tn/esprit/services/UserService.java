@@ -1,5 +1,6 @@
 package tn.esprit.services;
 
+import org.mindrot.jbcrypt.BCrypt;
 import tn.esprit.entities.User;
 import tn.esprit.entities.UserDashboardStats;
 import tn.esprit.utils.MyDB;
@@ -46,37 +47,17 @@ public class UserService {
                     stmt.setString(1, user.getFirstName());
                     stmt.setString(2, user.getLastName());
                     stmt.setString(3, user.getEmail());
-                    stmt.setString(4, user.getPassword());
+                    stmt.setString(4, hashPasswordIfNeeded(user.getPassword()));
                     stmt.setString(5, "[\"ROLE_ADMIN\"]");
                     return executeCreateStatement(user, stmt);
                 }
             }
 
             if (ROLE_DOCTOR.equals(role)) {
-                String query = "INSERT INTO doctor (first_name, last_name, email, password, speciality, roles) VALUES (?, ?, ?, ?, ?, ?)";
-                try (PreparedStatement stmt = connection.prepareStatement(query, Statement.RETURN_GENERATED_KEYS)) {
-                    stmt.setString(1, user.getFirstName());
-                    stmt.setString(2, user.getLastName());
-                    stmt.setString(3, user.getEmail());
-                    stmt.setString(4, user.getPassword());
-                    stmt.setString(5, defaultString(user.getSpeciality()));
-                    stmt.setString(6, "[\"ROLE_DOCTOR\"]");
-                    return executeCreateStatement(user, stmt);
-                }
+                return createDoctorUser(connection, user, true);
             }
 
-            String query = "INSERT INTO user (full_name, email, password, phone, address, face_image_path, face_token, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-            try (PreparedStatement stmt = connection.prepareStatement(query, Statement.RETURN_GENERATED_KEYS)) {
-                stmt.setString(1, user.getFullName());
-                stmt.setString(2, user.getEmail());
-                stmt.setString(3, user.getPassword());
-                stmt.setString(4, defaultString(user.getPhone()));
-                stmt.setString(5, defaultString(user.getAddress()));
-                stmt.setString(6, blankToNull(user.getFaceImagePath()));
-                stmt.setString(7, blankToNull(user.getFaceToken()));
-                stmt.setString(8, "[\"ROLE_USER\"]");
-                return executeCreateStatement(user, stmt);
-            }
+            return createPatientUser(connection, user, true);
         } catch (SQLException e) {
             System.err.println("Error adding user: " + e.getMessage());
             return false;
@@ -103,7 +84,7 @@ public class UserService {
                     stmt.setString(1, user.getFirstName());
                     stmt.setString(2, user.getLastName());
                     stmt.setString(3, user.getEmail());
-                    stmt.setString(4, user.getPassword());
+                    stmt.setString(4, hashPasswordIfNeeded(user.getPassword()));
                     stmt.setInt(5, user.getId());
                     return stmt.executeUpdate() > 0;
                 }
@@ -115,7 +96,7 @@ public class UserService {
                     stmt.setString(1, user.getFirstName());
                     stmt.setString(2, user.getLastName());
                     stmt.setString(3, user.getEmail());
-                    stmt.setString(4, user.getPassword());
+                    stmt.setString(4, hashPasswordIfNeeded(user.getPassword()));
                     stmt.setString(5, defaultString(user.getSpeciality()));
                     stmt.setInt(6, user.getId());
                     return stmt.executeUpdate() > 0;
@@ -128,7 +109,7 @@ public class UserService {
             try (PreparedStatement stmt = connection.prepareStatement(query)) {
                 stmt.setString(1, user.getFullName());
                 stmt.setString(2, user.getEmail());
-                stmt.setString(3, user.getPassword());
+                stmt.setString(3, hashPasswordIfNeeded(user.getPassword()));
                 stmt.setString(4, defaultString(user.getPhone()));
                 stmt.setString(5, defaultString(user.getAddress()));
                 stmt.setString(6, blankToNull(user.getFaceImagePath()));
@@ -450,6 +431,90 @@ public class UserService {
         return true;
     }
 
+    private boolean createPatientUser(Connection connection, User user, boolean includeVerified) throws SQLException {
+        String query = includeVerified
+                ? "INSERT INTO user (full_name, email, password, phone, address, face_image_path, face_token, roles, is_verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                : "INSERT INTO user (full_name, email, password, phone, address, face_image_path, face_token, roles) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+
+        try (PreparedStatement stmt = connection.prepareStatement(query, Statement.RETURN_GENERATED_KEYS)) {
+            stmt.setString(1, user.getFullName());
+            stmt.setString(2, user.getEmail());
+            stmt.setString(3, hashPasswordIfNeeded(user.getPassword()));
+            stmt.setString(4, defaultString(user.getPhone()));
+            stmt.setString(5, defaultString(user.getAddress()));
+            stmt.setString(6, blankToNull(user.getFaceImagePath()));
+            stmt.setString(7, blankToNull(user.getFaceToken()));
+            stmt.setString(8, "[\"ROLE_USER\"]");
+            if (includeVerified) {
+                stmt.setInt(9, 1);
+            }
+            return executeCreateStatement(user, stmt);
+        } catch (SQLException e) {
+            if (!includeVerified || !canRetryWithoutVerified(e)) {
+                throw e;
+            }
+            tryAddVerificationColumn(connection, "user");
+            try {
+                return createPatientUser(connection, user, true);
+            } catch (SQLException retryError) {
+                if (!canRetryWithoutVerified(retryError)) {
+                    throw retryError;
+                }
+                return createPatientUser(connection, user, false);
+            }
+        }
+    }
+
+    private boolean createDoctorUser(Connection connection, User user, boolean includeVerified) throws SQLException {
+        String query = includeVerified
+                ? "INSERT INTO doctor (first_name, last_name, email, password, speciality, roles, is_verified) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                : "INSERT INTO doctor (first_name, last_name, email, password, speciality, roles) VALUES (?, ?, ?, ?, ?, ?)";
+
+        try (PreparedStatement stmt = connection.prepareStatement(query, Statement.RETURN_GENERATED_KEYS)) {
+            stmt.setString(1, user.getFirstName());
+            stmt.setString(2, user.getLastName());
+            stmt.setString(3, user.getEmail());
+            stmt.setString(4, hashPasswordIfNeeded(user.getPassword()));
+            stmt.setString(5, defaultString(user.getSpeciality()));
+            stmt.setString(6, "[\"ROLE_DOCTOR\"]");
+            if (includeVerified) {
+                stmt.setInt(7, 1);
+            }
+            return executeCreateStatement(user, stmt);
+        } catch (SQLException e) {
+            if (!includeVerified || !canRetryWithoutVerified(e)) {
+                throw e;
+            }
+            tryAddVerificationColumn(connection, "doctor");
+            try {
+                return createDoctorUser(connection, user, true);
+            } catch (SQLException retryError) {
+                if (!canRetryWithoutVerified(retryError)) {
+                    throw retryError;
+                }
+                return createDoctorUser(connection, user, false);
+            }
+        }
+    }
+
+    private boolean canRetryWithoutVerified(SQLException e) {
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return message.contains("is_verified")
+                || message.contains("doesn't exist in engine")
+                || message.contains("does not exist in engine");
+    }
+
+    private void tryAddVerificationColumn(Connection connection, String tableName) {
+        if (!"user".equals(tableName) && !"doctor".equals(tableName)) {
+            return;
+        }
+        try (Statement stmt = connection.createStatement()) {
+            stmt.executeUpdate("ALTER TABLE `" + tableName + "` ADD COLUMN `is_verified` TINYINT(1) NOT NULL DEFAULT 1");
+        } catch (SQLException e) {
+            System.err.println("Could not add is_verified column automatically to " + tableName + ": " + e.getMessage());
+        }
+    }
+
     private void preserveFaceDataIfMissing(User user) {
         if (user == null || user.getId() <= 0 || !ROLE_USER.equals(normalizeRole(user.getRole()))) {
             return;
@@ -555,6 +620,14 @@ public class UserService {
 
     private String defaultString(String value) {
         return value == null ? "" : value;
+    }
+
+    private String hashPasswordIfNeeded(String password) {
+        if (password != null
+                && (password.startsWith("$2a$") || password.startsWith("$2y$") || password.startsWith("$2b$"))) {
+            return password;
+        }
+        return BCrypt.hashpw(password, BCrypt.gensalt());
     }
 
     private String blankToNull(String value) {

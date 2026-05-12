@@ -2,6 +2,13 @@ package tn.esprit.utils;
 
 import javafx.scene.control.*;
 import javafx.scene.layout.VBox;
+
+import javax.naming.NamingException;
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.DirContext;
+import javax.naming.directory.InitialDirContext;
+import java.util.Hashtable;
 import java.util.regex.Pattern;
 
 /**
@@ -25,7 +32,39 @@ public class FormValidator {
      * Static method: Validates email format
      */
     public static boolean isValidEmail(String email) {
-        return EMAIL_PATTERN.matcher(email).matches();
+        return email != null && EMAIL_PATTERN.matcher(email).matches();
+    }
+
+    public static boolean hasValidMailDomain(String email) {
+        if (!isValidEmail(email)) {
+            return false;
+        }
+
+        String domain = email.substring(email.lastIndexOf('@') + 1).trim().toLowerCase();
+        if (domain.isBlank() || !domain.contains(".") || domain.startsWith(".") || domain.endsWith(".")) {
+            return false;
+        }
+
+        Hashtable<String, String> environment = new Hashtable<>();
+        environment.put("java.naming.factory.initial", "com.sun.jndi.dns.DnsContextFactory");
+        environment.put("com.sun.jndi.dns.timeout.initial", "2000");
+        environment.put("com.sun.jndi.dns.timeout.retries", "1");
+
+        try {
+            DirContext context = new InitialDirContext(environment);
+            Attributes mxRecords = context.getAttributes(domain, new String[]{"MX"});
+            Attribute mx = mxRecords.get("MX");
+            if (mx != null && mx.size() > 0) {
+                return true;
+            }
+
+            Attributes addressRecords = context.getAttributes(domain, new String[]{"A", "AAAA"});
+            Attribute a = addressRecords.get("A");
+            Attribute aaaa = addressRecords.get("AAAA");
+            return (a != null && a.size() > 0) || (aaaa != null && aaaa.size() > 0);
+        } catch (NamingException e) {
+            return false;
+        }
     }
 
     /**

@@ -8,7 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-public final class AppointmentDoctorDirectory {
+public final class  AppointmentDoctorDirectory {
     private static final Map<String, List<DoctorProfile>> DOCTORS_BY_SPECIALTY = buildDoctorsBySpecialty();
 
     private AppointmentDoctorDirectory() {

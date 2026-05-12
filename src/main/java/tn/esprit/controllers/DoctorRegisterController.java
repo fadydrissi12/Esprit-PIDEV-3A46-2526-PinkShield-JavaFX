@@ -11,6 +11,7 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TextInputDialog;
 import javafx.scene.web.WebView;
 import javafx.stage.Stage;
 import tn.esprit.services.AuthService;
@@ -19,6 +20,7 @@ import tn.esprit.utils.FormValidator;
 import tn.esprit.utils.RecaptchaWidget;
 
 import java.io.IOException;
+import java.util.Optional;
 
 public class DoctorRegisterController {
     @FXML private Label feedbackLabel;
@@ -86,6 +88,10 @@ public class DoctorRegisterController {
             showFieldError(emailField, "Enter a valid email address.");
             return;
         }
+        if (!FormValidator.hasValidMailDomain(email)) {
+            showFieldError(emailField, "Use an email address with a real mail domain.");
+            return;
+        }
         if (speciality == null || speciality.isBlank()) {
             specialityCombo.setStyle("-fx-border-color: #ff6b6b; -fx-border-width: 2;");
             FormValidator.setMessage(feedbackLabel, "Medical speciality is required.", true);
@@ -115,14 +121,79 @@ public class DoctorRegisterController {
         }
 
         registerButton.setDisable(true);
-        registerButton.setText("Creating account...");
+        registerButton.setText("Sending code...");
 
-        Task<DoctorRegistrationResult> registrationTask = new Task<>() {
+        Task<DoctorRegistrationResult> verificationTask = new Task<>() {
             @Override
             protected DoctorRegistrationResult call() {
                 var verification = recaptchaWidget.verifyCurrentToken();
                 if (!verification.success()) {
                     return DoctorRegistrationResult.failed(verification.message(), verification.resetRequired());
+                }
+
+                String emailError = authService.sendRegistrationVerificationCode(email);
+                if (emailError != null) {
+                    return DoctorRegistrationResult.failed(emailError, true);
+                }
+
+                return DoctorRegistrationResult.codeSent();
+            }
+        };
+
+        verificationTask.setOnSucceeded(event -> {
+            restoreRegisterButton();
+
+            DoctorRegistrationResult result = verificationTask.getValue();
+            if (result.resetCaptcha()) {
+                recaptchaWidget.reset();
+            }
+
+            if (!result.success()) {
+                FormValidator.setMessage(feedbackLabel, result.message(), true);
+                return;
+            }
+
+            promptDoctorVerificationCode(firstName, lastName, email, password, speciality);
+        });
+
+        verificationTask.setOnFailed(event -> {
+            restoreRegisterButton();
+            recaptchaWidget.reset();
+            Throwable error = verificationTask.getException();
+            FormValidator.setMessage(
+                    feedbackLabel,
+                    error == null ? "Registration failed. Please try again." : error.getMessage(),
+                    true
+            );
+        });
+
+        Thread backgroundThread = new Thread(verificationTask, "doctor-register-verification");
+        backgroundThread.setDaemon(true);
+        backgroundThread.start();
+    }
+
+    private void promptDoctorVerificationCode(String firstName, String lastName, String email, String password, String speciality) {
+        TextInputDialog dialog = new TextInputDialog();
+        dialog.setTitle("Verify Email");
+        dialog.setHeaderText("Enter the 6-digit code sent to " + email);
+        dialog.setContentText("Verification code:");
+
+        Optional<String> code = dialog.showAndWait();
+        if (code.isEmpty()) {
+            recaptchaWidget.reset();
+            FormValidator.setMessage(feedbackLabel, "Email verification was cancelled. Request a new code to continue.", true);
+            return;
+        }
+
+        registerButton.setDisable(true);
+        registerButton.setText("Creating account...");
+
+        Task<DoctorRegistrationResult> registrationTask = new Task<>() {
+            @Override
+            protected DoctorRegistrationResult call() {
+                String verificationError = authService.verifyRegistrationCode(email, code.get());
+                if (verificationError != null) {
+                    return DoctorRegistrationResult.failed(verificationError, true);
                 }
 
                 boolean success = authService.registerDoctor(firstName, lastName, email, password, speciality);
@@ -139,12 +210,9 @@ public class DoctorRegisterController {
 
         registrationTask.setOnSucceeded(event -> {
             restoreRegisterButton();
+            recaptchaWidget.reset();
 
             DoctorRegistrationResult result = registrationTask.getValue();
-            if (result.resetCaptcha()) {
-                recaptchaWidget.reset();
-            }
-
             if (!result.success()) {
                 FormValidator.setMessage(feedbackLabel, result.message(), true);
                 return;
@@ -165,7 +233,7 @@ public class DoctorRegisterController {
             );
         });
 
-        Thread backgroundThread = new Thread(registrationTask, "doctor-register-recaptcha");
+        Thread backgroundThread = new Thread(registrationTask, "doctor-register-create-account");
         backgroundThread.setDaemon(true);
         backgroundThread.start();
     }
@@ -231,6 +299,10 @@ public class DoctorRegisterController {
     private record DoctorRegistrationResult(boolean success, String message, boolean resetCaptcha) {
         private static DoctorRegistrationResult created() {
             return new DoctorRegistrationResult(true, "", true);
+        }
+
+        private static DoctorRegistrationResult codeSent() {
+            return new DoctorRegistrationResult(true, "", false);
         }
 
         private static DoctorRegistrationResult failed(String message, boolean resetCaptcha) {

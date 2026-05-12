@@ -240,6 +240,13 @@ public class WishlistCheckoutController {
                         "Transaction successful",
                         "Your payment of " + formatPrice(totalAmount) + " succeeded. Transaction ID: " + transactionId + "."
                 );
+                notificationService.notifySymfonyUser(
+                        currentUser,
+                        "Transaction successful",
+                        "Your payment of " + formatPrice(totalAmount) + " succeeded. Transaction ID: " + transactionId + ".",
+                        "success",
+                        "fas fa-credit-card"
+                );
                 
                 // Clear forms and wishlist
                 clearPaymentForm();

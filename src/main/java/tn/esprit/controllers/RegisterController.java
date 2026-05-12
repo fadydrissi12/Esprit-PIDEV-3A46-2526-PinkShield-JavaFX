@@ -8,9 +8,10 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import tn.esprit.entities.User;
 import tn.esprit.services.AuthService;
+import tn.esprit.utils.FormValidator;
 
 import java.io.IOException;
-import java.util.regex.Pattern;
+import java.util.Optional;
 
 public class RegisterController {
     @FXML private RadioButton patientRadio;
@@ -65,8 +66,13 @@ public class RegisterController {
             return;
         }
 
-        if (!isValidEmail(email)) {
+        if (!FormValidator.isValidEmail(email)) {
             showAlert("Error", "Invalid email format", Alert.AlertType.ERROR);
+            return;
+        }
+
+        if (!FormValidator.hasValidMailDomain(email)) {
+            showAlert("Error", "Use an email address with a real mail domain.", Alert.AlertType.ERROR);
             return;
         }
 
@@ -82,6 +88,28 @@ public class RegisterController {
 
         if (authService.emailExists(email)) {
             showAlert("Error", "Email already exists", Alert.AlertType.ERROR);
+            return;
+        }
+
+        String emailError = authService.sendRegistrationVerificationCode(email);
+        if (emailError != null) {
+            showAlert("Error", emailError, Alert.AlertType.ERROR);
+            return;
+        }
+
+        TextInputDialog dialog = new TextInputDialog();
+        dialog.setTitle("Verify Email");
+        dialog.setHeaderText("Enter the 6-digit code sent to " + email);
+        dialog.setContentText("Verification code:");
+        Optional<String> code = dialog.showAndWait();
+        if (code.isEmpty()) {
+            showAlert("Error", "Email verification was cancelled. Request a new code to continue.", Alert.AlertType.ERROR);
+            return;
+        }
+
+        String verificationError = authService.verifyRegistrationCode(email, code.get());
+        if (verificationError != null) {
+            showAlert("Error", verificationError, Alert.AlertType.ERROR);
             return;
         }
 
@@ -144,12 +172,6 @@ public class RegisterController {
             showAlert("Error", "Failed to load login page", Alert.AlertType.ERROR);
             e.printStackTrace();
         }
-    }
-
-    private boolean isValidEmail(String email) {
-        String emailRegex = "^[A-Za-z0-9+_.-]+@(.+)$";
-        Pattern pattern = Pattern.compile(emailRegex);
-        return pattern.matcher(email).matches();
     }
 
     private void showAlert(String title, String message, Alert.AlertType type) {

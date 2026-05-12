@@ -9,6 +9,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.Label;
 import javafx.scene.control.PasswordField;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TextInputDialog;
 import javafx.scene.web.WebView;
 import javafx.stage.Stage;
 import tn.esprit.services.AuthService;
@@ -19,6 +20,7 @@ import tn.esprit.utils.WebcamCaptureDialog;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Optional;
 
 public class PatientRegisterController {
     @FXML private Label feedbackLabel;
@@ -79,6 +81,10 @@ public class PatientRegisterController {
             showFieldError(emailField, "Enter a valid email address.");
             return;
         }
+        if (!FormValidator.hasValidMailDomain(email)) {
+            showFieldError(emailField, "Use an email address with a real mail domain.");
+            return;
+        }
         if (!FormValidator.isValidPhone(phone)) {
             showFieldError(phoneField, "Phone number must contain 8 to 20 digits.");
             return;
@@ -112,16 +118,95 @@ public class PatientRegisterController {
 
         String fullName = (firstName + " " + lastName).trim();
         registerButton.setDisable(true);
-        registerButton.setText("Creating account...");
+        registerButton.setText("Sending code...");
         chooseFaceImageButton.setDisable(true);
 
-        Path faceImagePath = selectedFaceImagePath;
-        Task<AuthService.PatientRegistrationResult> registrationTask = new Task<>() {
+        Task<AuthService.PatientRegistrationResult> verificationTask = new Task<>() {
             @Override
             protected AuthService.PatientRegistrationResult call() {
                 var verification = recaptchaWidget.verifyCurrentToken();
                 if (!verification.success()) {
                     return AuthService.PatientRegistrationResult.failure(verification.message());
+                }
+
+                String emailError = authService.sendRegistrationVerificationCode(email);
+                if (emailError != null) {
+                    return AuthService.PatientRegistrationResult.failure(emailError);
+                }
+
+                return AuthService.PatientRegistrationResult.success(false, "Verification code sent.");
+            }
+        };
+
+        verificationTask.setOnSucceeded(event -> {
+            registerButton.setDisable(false);
+            registerButton.setText("Register as Patient");
+            chooseFaceImageButton.setDisable(false);
+
+            AuthService.PatientRegistrationResult result = verificationTask.getValue();
+            if (!result.success()) {
+                recaptchaWidget.reset();
+                FormValidator.setMessage(
+                        feedbackLabel,
+                        result.message() == null || result.message().isBlank()
+                                ? "Registration failed. Check the entered details and try again."
+                                : result.message(),
+                        true
+                );
+                return;
+            }
+
+            promptPatientVerificationCode(fullName, email, password, phone, address, selectedFaceImagePath);
+        });
+
+        verificationTask.setOnFailed(event -> {
+            registerButton.setDisable(false);
+            registerButton.setText("Register as Patient");
+            chooseFaceImageButton.setDisable(false);
+            recaptchaWidget.reset();
+            Throwable error = verificationTask.getException();
+            FormValidator.setMessage(
+                    feedbackLabel,
+                    error == null ? "Registration failed. Please try again." : error.getMessage(),
+                    true
+            );
+        });
+
+        Thread backgroundThread = new Thread(verificationTask, "patient-register-verification");
+        backgroundThread.setDaemon(true);
+        backgroundThread.start();
+    }
+
+    private void promptPatientVerificationCode(
+            String fullName,
+            String email,
+            String password,
+            String phone,
+            String address,
+            Path faceImagePath
+    ) {
+        TextInputDialog dialog = new TextInputDialog();
+        dialog.setTitle("Verify Email");
+        dialog.setHeaderText("Enter the 6-digit code sent to " + email);
+        dialog.setContentText("Verification code:");
+
+        Optional<String> code = dialog.showAndWait();
+        if (code.isEmpty()) {
+            recaptchaWidget.reset();
+            FormValidator.setMessage(feedbackLabel, "Email verification was cancelled. Request a new code to continue.", true);
+            return;
+        }
+
+        registerButton.setDisable(true);
+        registerButton.setText("Creating account...");
+        chooseFaceImageButton.setDisable(true);
+
+        Task<AuthService.PatientRegistrationResult> registrationTask = new Task<>() {
+            @Override
+            protected AuthService.PatientRegistrationResult call() {
+                String verificationError = authService.verifyRegistrationCode(email, code.get());
+                if (verificationError != null) {
+                    return AuthService.PatientRegistrationResult.failure(verificationError);
                 }
                 return authService.registerPatientWithFace(fullName, email, password, phone, address, faceImagePath);
             }
@@ -165,7 +250,7 @@ public class PatientRegisterController {
             );
         });
 
-        Thread backgroundThread = new Thread(registrationTask, "patient-register-face");
+        Thread backgroundThread = new Thread(registrationTask, "patient-register-create-account");
         backgroundThread.setDaemon(true);
         backgroundThread.start();
     }

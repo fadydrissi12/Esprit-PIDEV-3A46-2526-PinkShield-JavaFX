@@ -19,6 +19,22 @@ public class EmailService {
     private static final String MAIL_PROPERTIES_FILE = "mail.properties";
 
     public String sendPasswordResetCode(String recipientEmail, String verificationCode) {
+        return sendVerificationCode(
+                recipientEmail,
+                "PinkShield password reset verification code",
+                buildPasswordResetBody(verificationCode)
+        );
+    }
+
+    public String sendRegistrationVerificationCode(String recipientEmail, String verificationCode) {
+        return sendVerificationCode(
+                recipientEmail,
+                "PinkShield account verification code",
+                buildRegistrationBody(verificationCode)
+        );
+    }
+
+    private String sendVerificationCode(String recipientEmail, String subject, String body) {
         SmtpConfig config = loadConfig();
         if (!config.isConfigured()) {
             return "Email sending is not configured. Add SMTP settings in mail.properties or define SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, and SMTP_FROM.";
@@ -53,8 +69,8 @@ public class EmailService {
             Message message = new MimeMessage(session);
             message.setFrom(new InternetAddress(config.from()));
             message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(recipientEmail));
-            message.setSubject("PinkShield password reset verification code");
-            message.setText(buildPasswordResetBody(verificationCode));
+            message.setSubject(subject);
+            message.setText(body);
             Transport.send(message);
             return null;
         } catch (MessagingException e) {
@@ -70,6 +86,17 @@ public class EmailService {
 
                 This code expires in 10 minutes.
                 If you did not request a password reset, you can ignore this email.
+                """.formatted(verificationCode);
+    }
+
+    private String buildRegistrationBody(String verificationCode) {
+        return """
+                PinkShield Account Verification
+
+                Your registration verification code is: %s
+
+                This code expires in 10 minutes.
+                If you did not try to create a PinkShield account, you can ignore this email.
                 """.formatted(verificationCode);
     }
 

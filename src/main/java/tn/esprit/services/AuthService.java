@@ -1,5 +1,6 @@
 package tn.esprit.services;
 
+import org.mindrot.jbcrypt.BCrypt;
 import tn.esprit.entities.User;
 import tn.esprit.utils.MyDB;
 
@@ -19,6 +20,7 @@ public class AuthService {
     private static final int RESET_CODE_EXPIRATION_MINUTES = 10;
     private static final int RESET_CODE_MAX_ATTEMPTS = 5;
     private static final Map<String, PasswordResetSession> PASSWORD_RESET_SESSIONS = new ConcurrentHashMap<>();
+    private static final Map<String, PasswordResetSession> REGISTRATION_VERIFICATION_SESSIONS = new ConcurrentHashMap<>();
 
     private final UserService userService = new UserService();
     private final EmailService emailService = new EmailService();
@@ -45,6 +47,60 @@ public class AuthService {
 
     public boolean emailExists(String email) {
         return userService.emailExists(email);
+    }
+
+    public String sendRegistrationVerificationCode(String email) {
+        String normalizedEmail = normalizeEmail(email);
+        if (normalizedEmail.isEmpty()) {
+            return "Email is required.";
+        }
+        if (userService.emailExists(normalizedEmail)) {
+            return "This email address already exists.";
+        }
+
+        String verificationCode = generateVerificationCode();
+        String emailError = emailService.sendRegistrationVerificationCode(normalizedEmail, verificationCode);
+        if (emailError != null) {
+            return emailError;
+        }
+
+        REGISTRATION_VERIFICATION_SESSIONS.put(
+                sessionKey(normalizedEmail),
+                new PasswordResetSession(
+                        verificationCode,
+                        Instant.now().plus(RESET_CODE_EXPIRATION_MINUTES, ChronoUnit.MINUTES)
+                )
+        );
+        return null;
+    }
+
+    public String verifyRegistrationCode(String email, String verificationCode) {
+        String normalizedEmail = normalizeEmail(email);
+        if (normalizedEmail.isEmpty()) {
+            return "Email is required.";
+        }
+        if (verificationCode == null || verificationCode.trim().isEmpty()) {
+            return "Verification code is required.";
+        }
+
+        String key = sessionKey(normalizedEmail);
+        PasswordResetSession session = REGISTRATION_VERIFICATION_SESSIONS.get(key);
+        if (session == null || session.isExpired()) {
+            REGISTRATION_VERIFICATION_SESSIONS.remove(key);
+            return "Request a new verification code first.";
+        }
+
+        if (!session.code().equals(verificationCode.trim())) {
+            int attempts = session.registerFailedAttempt();
+            if (attempts >= RESET_CODE_MAX_ATTEMPTS) {
+                REGISTRATION_VERIFICATION_SESSIONS.remove(key);
+                return "Too many invalid verification attempts. Request a new code.";
+            }
+            return "Verification code is invalid.";
+        }
+
+        REGISTRATION_VERIFICATION_SESSIONS.remove(key);
+        return null;
     }
 
     public String sendPasswordResetCode(String email) {
@@ -275,7 +331,7 @@ public class AuthService {
                 }
 
                 String storedPassword = rs.getString("password");
-                if (!storedPassword.equals(password)) {
+                if (!verifyPassword(password, storedPassword)) {
                     return null;
                 }
 
@@ -340,7 +396,7 @@ public class AuthService {
     private boolean updatePasswordForTable(Connection connection, String tableName, String email, String newPassword) {
         String query = "UPDATE " + tableName + " SET password = ? WHERE email = ?";
         try (PreparedStatement stmt = connection.prepareStatement(query)) {
-            stmt.setString(1, newPassword);
+            stmt.setString(1, BCrypt.hashpw(newPassword, BCrypt.gensalt()));
             stmt.setString(2, email);
             return stmt.executeUpdate() > 0;
         } catch (SQLException e) {
@@ -351,6 +407,24 @@ public class AuthService {
 
     private String formatConfidence(double value) {
         return String.format(Locale.US, "%.1f", value);
+    }
+
+    private boolean verifyPassword(String rawPassword, String storedPassword) {
+        if (rawPassword == null || storedPassword == null || storedPassword.isBlank()) {
+            return false;
+        }
+        try {
+            return BCrypt.checkpw(rawPassword, normalizeBcryptHash(storedPassword));
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    private String normalizeBcryptHash(String hash) {
+        if (hash != null && (hash.startsWith("$2y$") || hash.startsWith("$2b$"))) {
+            return "$2a$" + hash.substring(4);
+        }
+        return hash;
     }
 
     public record PatientRegistrationResult(boolean success, boolean faceEnrolled, String message) {

@@ -63,6 +63,26 @@ public class NotificationService {
         }
     }
 
+    public boolean notifySymfonyUser(User user, String title, String message, String type, String icon) {
+        if (user == null) {
+            return false;
+        }
+
+        String sql = "INSERT INTO notification (user_id, admin_id, title, message, type, icon, is_read, created_at) "
+                + "VALUES (?, NULL, ?, ?, ?, ?, 0, NOW())";
+        try (PreparedStatement ps = getConnection().prepareStatement(sql)) {
+            ps.setInt(1, user.getId());
+            ps.setString(2, safe(title));
+            ps.setString(3, safe(message));
+            ps.setString(4, safe(type).isBlank() ? "info" : safe(type));
+            ps.setString(5, safe(icon).isBlank() ? "fas fa-bell" : safe(icon));
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            System.err.println("Error saving Symfony notification: " + e.getMessage());
+            return false;
+        }
+    }
+
     public List<NotificationItem> getNotificationsForUser(User user, int limit) {
         if (user == null) {
             return List.of();

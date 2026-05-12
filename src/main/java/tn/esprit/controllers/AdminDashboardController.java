@@ -401,6 +401,8 @@ public class AdminDashboardController {
                 ((BlogListController) controller).setCurrentUser(loggedInUser);
             } else if (controller instanceof BlogDetailController) {
                 ((BlogDetailController) controller).setCurrentUser(loggedInUser);
+            } else if (controller instanceof ForumController) {
+                ((ForumController) controller).setLoggedInUser(loggedInUser);
             } else if (controller instanceof AppointmentListController) {
                 ((AppointmentListController) controller).setCurrentUser(loggedInUser);
             } else if (controller instanceof ProductListController) {
