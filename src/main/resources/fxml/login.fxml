@@ -47,7 +47,7 @@
         <Region layoutX="1186" layoutY="582" prefWidth="4" prefHeight="4" styleClass="star-dot star-dot-secondary" />
     </Pane>
 
-    <HBox alignment="CENTER" spacing="56" maxWidth="1320" styleClass="login-template-layout">
+    <HBox alignment="CENTER_LEFT" spacing="40" maxWidth="Infinity" styleClass="login-template-layout">
         <VBox prefWidth="520" alignment="CENTER" spacing="22" styleClass="login-hero-side">
             <Label text="PinkShield" styleClass="login-brand-title" />
             <Label text="ADVANCED HEALTH INTELLIGENCE" styleClass="login-brand-tagline" />
@@ -84,6 +84,8 @@
                        styleClass="login-floating-pill login-floating-pill-primary" />
             </Pane>
         </VBox>
+
+        <Region minWidth="24" HBox.hgrow="ALWAYS" />
 
         <VBox prefWidth="560" maxWidth="560" maxHeight="Infinity" styleClass="login-form-side">
             <ScrollPane fitToWidth="true" hbarPolicy="NEVER" vbarPolicy="AS_NEEDED"

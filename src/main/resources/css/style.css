@@ -1596,8 +1596,8 @@
 }
 
 .login-template-layout {
-    -fx-alignment: center;
-    -fx-padding: 22 10 22 10;
+    -fx-alignment: center-left;
+    -fx-padding: 22 58 22 58;
 }
 
 .login-hero-side {
