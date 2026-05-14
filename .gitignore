@@ -1,8 +1,17 @@
-<<<<<<< HEAD
 target/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
+
+### Local secrets ###
+mail.properties
+facepp.properties
+openai.properties
+api2pdf.properties
+geoapify.properties
+
+### Local generated assets ###
+images/faces/
 
 ### IntelliJ IDEA ###
 .idea/modules.xml
@@ -37,9 +46,3 @@ build/
 
 ### Mac OS ###
 .DS_Store
-=======
-mail.properties
-facepp.properties
-images/faces/
-openai.properties
->>>>>>> origin/GestionUserJava
